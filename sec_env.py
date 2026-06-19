@@ -6,6 +6,9 @@ Self-contained AES-256-CBC encryption/decryption module using password-derived k
 All password handling uses mutable bytearray buffers to securely wipe sensitive
 material from memory after use, mitigating string immutability/interning risks.
 
+Encrypted values are prefixed with '$e$' for deterministic detection, eliminating
+false positives from long alphanumeric plaintext values.
+
 Usage:
     import sec_env
 
@@ -27,7 +30,6 @@ Usage:
 """
 
 import os
-import re
 import gc
 import getpass
 from pathlib import Path
@@ -43,12 +45,10 @@ from cryptography.hazmat.backends import default_backend
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_ENV_FILE = ".env"
+DEFAULT_ENV_FILE = ".env.test"
 
-# Encryption detection pattern (base64 with salt(16)+iv(16)+ct >= 32 bytes ~44 chars)
-ENCRYPTED_PATTERN = re.compile(
-    r'^[A-Za-z0-9+/=]{48,}$'
-)
+# Prefix for encrypted values to enable deterministic detection
+ENC_PREFIX = "$e$"
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def encrypt_with_password(plaintext: str, password: Union[str, bytes, bytearray]
                  memory; prefer bytearray from _make_bytearray().
 
     Returns:
-        Base64-encoded string containing salt + IV + ciphertext.
+        A string consisting of ENC_PREFIX + base64-encoded salt+IV+ciphertext.
     """
     # Convert password to bytes if needed
     if isinstance(password, str):
@@ -129,7 +129,8 @@ def encrypt_with_password(plaintext: str, password: Union[str, bytes, bytearray]
 
     ct = encryptor.update(padded_data) + encryptor.finalize()
 
-    return base64.b64encode(salt + iv + ct).decode('utf-8')
+    base64_ct = base64.b64encode(salt + iv + ct).decode('utf-8')
+    return ENC_PREFIX + base64_ct
 
 
 def decrypt_with_password(encrypted_text: str, password: Union[str, bytes, bytearray]) -> str:
@@ -137,19 +138,25 @@ def decrypt_with_password(encrypted_text: str, password: Union[str, bytes, bytea
     Decrypt data that was encrypted with encrypt_with_password.
 
     Args:
-        encrypted_text: Base64 string containing salt + IV + ciphertext.
+        encrypted_text: A string starting with ENC_PREFIX followed by
+                        base64-encoded salt + IV + ciphertext.
         password: Password for key derivation. Can be str, bytes, or bytearray.
                  Prefer bytearray from _make_bytearray().
 
     Returns:
         Decrypted plaintext string.
     """
+    # Strip the prefix before decoding
+    if not encrypted_text.startswith(ENC_PREFIX):
+        raise ValueError("Encrypted text missing prefix")
+    b64_data = encrypted_text[len(ENC_PREFIX):]
+
     if isinstance(password, str):
         pw_bytes = password.encode('utf-8')
     else:
         pw_bytes = password
 
-    data = base64.b64decode(encrypted_text)
+    data = base64.b64decode(b64_data)
     salt = data[:16]
     iv = data[16:32]
     ct = data[32:]
@@ -178,8 +185,8 @@ def decrypt_with_password(encrypted_text: str, password: Union[str, bytes, bytea
 # ---------------------------------------------------------------------------
 
 def _is_encrypted(value: str) -> bool:
-    """Check if a value appears to be already encrypted (base64-like pattern)."""
-    return bool(ENCRYPTED_PATTERN.match(value.strip()))
+    """Check if a value appears to be already encrypted (has the $e$ prefix)."""
+    return value.strip().startswith(ENC_PREFIX)
 
 
 def _load_env_file(env_path: str) -> dict:
@@ -209,6 +216,37 @@ def _load_env_file(env_path: str) -> dict:
     return env_dict
 
 
+def _load_env_file_raw_lines(env_path: str) -> list:
+    """
+    Read all lines of a .env file preserving original formatting.
+    Returns list of (original_line, stripped, key, raw_value, quote_char) tuples.
+    """
+    path = Path(env_path)
+    if not path.exists():
+        raise FileNotFoundError(f"{env_path} not found")
+
+    results = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                results.append((line, stripped, None, None, None))
+                continue
+
+            key, _, value = stripped.partition("=")
+            key = key.strip()
+            value = value.strip()
+
+            quote_char = None
+            raw_value = value
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                quote_char = value[0]
+                raw_value = value[1:-1]
+
+            results.append((line, stripped, key, raw_value, quote_char))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -216,7 +254,7 @@ def _load_env_file(env_path: str) -> dict:
 def process(
     password: Optional[Union[str, bytearray]] = None,
     env_path: Optional[str] = None,
-    in_place: bool = False
+    in_place: bool = True
 ) -> None:
     """
     Encrypt all plaintext values in a .env file, overwriting the file in-place.
@@ -226,8 +264,8 @@ def process(
         env_path: Path to the .env file (defaults to '.env' in current directory).
         in_place: If True, overwrite the original file; otherwise write to a new file.
 
-    The function detects already-encrypted values and leaves them unchanged.
-    Comments, blank lines, and formatting are preserved.
+    The function detects already-encrypted values by checking for the '$e$' prefix
+    and leaves them unchanged. Comments, blank lines, and formatting are preserved.
     """
     if env_path is None:
         env_path = str(Path.cwd() / DEFAULT_ENV_FILE)
@@ -249,7 +287,7 @@ def process(
         _secure_wipe_bytearray(pw_ba)
         raise FileNotFoundError(f"{env_path} not found")
 
-    # Read file and process line by line, preserving comments/blanks
+    # Read file and process line by line
     lines = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -265,9 +303,11 @@ def process(
             key = key.strip()
             value = value.strip()
 
-            # Remove surrounding quotes for detection
+            # Detect quoting for preservation
+            quote_char = None
             raw_value = value
             if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                quote_char = value[0]
                 raw_value = value[1:-1]
 
             if _is_encrypted(raw_value):
@@ -277,7 +317,10 @@ def process(
             # Encrypt the value using bytearray password directly
             encrypted = encrypt_with_password(raw_value, pw_ba)
             indent = line[:len(line) - len(line.lstrip())]
-            new_line = f"{indent}{key}={encrypted}\n"
+            if quote_char:
+                new_line = f"{indent}{key}={quote_char}{encrypted}{quote_char}\n"
+            else:
+                new_line = f"{indent}{key}={encrypted}\n"
             lines.append(new_line)
 
     # Securely wipe password from memory
