@@ -15,6 +15,9 @@ Usage:
     # Decrypt and load environment variables like python-dotenv
     sec_env.load()
 
+    # Restore .env to plaintext (reverse encryption)
+    sec_env.restore()
+
     # Get a callable unlock object for on-demand decryption
     unlocker = sec_env.unlock("my_password")
     db_pass = unlocker("DB_PASSWORD")
@@ -474,3 +477,99 @@ def key(
         _secure_wipe_bytearray(pw_ba)
         pw_ba = None
         gc.collect()
+
+
+# ---------------------------------------------------------------------------
+# restore function - reverse encryption in-place
+# ---------------------------------------------------------------------------
+
+def restore(
+    password: Optional[Union[str, bytearray]] = None,
+    env_path: Optional[str] = None
+) -> None:
+    """
+    Decrypt all encrypted values in a .env file back to plaintext, overwriting
+    the file in-place. This reverses the encryption performed by process().
+
+    Args:
+        password: Password for decryption. If None, prompts interactively.
+        env_path: Path to the .env file (defaults to '.env' in current directory).
+
+    The function preserves comments, blank lines, and formatting.
+    Plaintext values (non-encrypted) are left unchanged.
+    """
+    if env_path is None:
+        env_path = str(Path.cwd() / DEFAULT_ENV_FILE)
+
+    # --- Password handling with bytearray ---
+    pw_ba: Optional[bytearray] = None
+    if password is None:
+        pw_str = getpass.getpass("Decryption password for restore: ")
+        pw_ba = _make_bytearray(pw_str)
+        pw_str = None
+    elif isinstance(password, str):
+        pw_ba = _make_bytearray(password)
+        password = None
+    else:
+        pw_ba = password
+
+    path = Path(env_path)
+    if not path.exists():
+        _secure_wipe_bytearray(pw_ba)
+        raise FileNotFoundError(f"{env_path} not found")
+
+    # Read file and process line by line
+    lines = []
+    decrypt_errors = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                lines.append(line)
+                continue
+            if "=" not in stripped:
+                lines.append(line)
+                continue
+
+            key, _, value = stripped.partition("=")
+            key = key.strip()
+            value = value.strip()
+
+            # Remove surrounding quotes for detection
+            raw_value = value
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                raw_value = value[1:-1]
+
+            if not _is_encrypted(raw_value):
+                lines.append(line)
+                continue
+
+            # Decrypt the value
+            try:
+                plaintext = decrypt_with_password(raw_value, pw_ba)
+                indent = line[:len(line) - len(line.lstrip())]
+                # Preserve original quoting if detected
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    new_line = f"{indent}{key}={value[0]}{plaintext}{value[0]}\n"
+                else:
+                    new_line = f"{indent}{key}={plaintext}\n"
+                lines.append(new_line)
+            except Exception as e:
+                decrypt_errors += 1
+                print(f"Warning: Failed to decrypt {key}: {e}")
+                lines.append(line)  # Keep original line on failure
+
+    # Securely wipe password from memory
+    if pw_ba is not None:
+        _secure_wipe_bytearray(pw_ba)
+        pw_ba = None
+    gc.collect()
+
+    # Write output
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+    if decrypt_errors:
+        print(f"Restore completed with {decrypt_errors} decryption error(s).")
+    else:
+        print(f"Restored {env_path} to plaintext.")
