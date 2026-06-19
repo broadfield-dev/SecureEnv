@@ -45,7 +45,7 @@ from cryptography.hazmat.backends import default_backend
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_ENV_FILE = ".env.test"
+DEFAULT_ENV_FILE = ".env"
 
 # Prefix for encrypted values to enable deterministic detection
 ENC_PREFIX = "$e$"
