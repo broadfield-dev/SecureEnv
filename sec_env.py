@@ -43,7 +43,7 @@ from cryptography.hazmat.backends import default_backend
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_ENV_FILE = ".env.test"
+DEFAULT_ENV_FILE = ".env"
 
 # Encryption detection pattern (base64 with salt(16)+iv(16)+ct >= 32 bytes ~44 chars)
 ENCRYPTED_PATTERN = re.compile(
