@@ -1,8 +1,8 @@
 # SecureEnv 🔐
 
-**Encrypt your `.env` files. Protect secrets from LLMs and system exfiltration.**
+**Encrypt your `.env` files. Protect secrets from LLMs, AI agents, and system exfiltration.**
 
-SecureEnv is a Python module that encrypts all sensitive values in your `.env` files using **AES-256-CBC** encryption. It provides a drop-in replacement workflow similar to `python-dotenv`, but with the critical difference that secrets are never stored in plaintext on disk.
+SecureEnv is a Python module that encrypts all sensitive values in your `.env` files using **AES-256-CBC** encryption. It provides a drop-in replacement workflow similar to `python-dotenv`, but with the critical difference that secrets are **never stored in plaintext on disk**.
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -16,6 +16,7 @@ Most developers store secrets in plaintext `.env` files. If an LLM, CI/CD pipeli
 
 - Secrets are **always encrypted on disk** — only decrypted in memory when explicitly requested.
 - Passwords are handled as **mutable bytearrays** and zeroed out immediately after use.
+- Encrypted values are **deterministically detected** via the `$e$` prefix — no false positives from long plaintext values.
 - Your workflow stays the same — just replace `load_dotenv()` with `sec_env.load()`.
 
 > **Ideal for**: AI/LLM project directories, shared development environments, CI/CD pipelines, and any scenario where `.env` files might be exposed to untrusted processes.
@@ -32,6 +33,7 @@ Most developers store secrets in plaintext `.env` files. If an LLM, CI/CD pipeli
 | **🔑 Flexible Access** | Load all vars at once, or decrypt individual keys on-demand |
 | **🧹 Memory Safety** | All passwords handled as mutable `bytearray` objects; zeroed out immediately after use |
 | **📝 Preserves Formatting** | Comments, blank lines, and key ordering are preserved in the encrypted `.env` file |
+| **🔍 Deterministic Detection** | Encrypted values use the `$e$` prefix — no false positives from long alphanumeric plaintext |
 | **🔍 Mixed Content** | Handles `.env` files with both encrypted and plaintext values |
 | **🛡️ Defense in Depth** | Multiple secure-wipe calls with garbage collection after sensitive operations |
 | **📦 Self-Contained** | No external dependencies beyond `cryptography` — all crypto functions included inline |
@@ -79,9 +81,9 @@ sec_env.process("my_password")
 After encryption, your `.env` looks like this:
 ```bash
 # .env (ENCRYPTED — SAFE!)
-DATABASE_URL=U2FsdGVkX18+ABC123...
-API_KEY=U2FsdGVkX18+DEF456...
-SECRET_TOKEN=U2FsdGVkX18+GHI789...
+DATABASE_URL=$e$U2FsdGVkX18+ABC123...
+API_KEY=$e$U2FsdGVkX18+DEF456...
+SECRET_TOKEN=$e$U2FsdGVkX18+GHI789...
 ```
 
 ### 2. Load and decrypt into environment
@@ -144,7 +146,7 @@ db_password = sec_env.key("DATABASE_URL", "my_secret_password")
 
 ### `sec_env.process(password=None, env_path=None, in_place=True)`
 
-Encrypts all plaintext values in a `.env` file. Already-encrypted values are left unchanged. Preserves comments, blank lines, and key ordering.
+Encrypts all plaintext values in a `.env` file. Already-encrypted values (detected by the `$e$` prefix) are left unchanged. Preserves comments, blank lines, and key ordering.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -182,16 +184,6 @@ Decrypts all encrypted values in a `.env` file back to plaintext, overwriting th
 - Preserves comments, blank lines, and formatting.
 - If a decryption error occurs, a warning is printed and the original encrypted line is preserved.
 - Password is securely wiped from memory after the operation completes.
-
-**Example:**
-```python
-# Encrypt
-sec_env.process("mypassword")
-
-# Later, restore to plaintext
-sec_env.restore("mypassword")
-# .env is now back to its original plaintext state
-```
 
 ---
 
@@ -250,16 +242,25 @@ User Input (str)  ──→  _make_bytearray()  ──→  bytearray   ──→
 4. **Secure Wipe**: `_secure_wipe_bytearray()` overwrites the buffer in-place with zero bytes (`ba[:] = b'\x00' * len(ba)`) and calls `gc.collect()`.
 5. **Exception Safety**: Even if an exception is raised, all public functions wipe the password in `finally` blocks before propagating the error.
 
+### The `$e$` Prefix — Deterministic Encryption Detection
+
+Unlike heuristic regex-based approaches that can falsely flag long alphanumeric plaintext values as already encrypted, SecureEnv uses a **deterministic prefix** (`$e$`) to mark encrypted values. This eliminates false positives entirely and ensures:
+
+- Any value starting with `$e$` is guaranteed to be encrypted (assuming valid ciphertext follows).
+- Any value without the prefix will always be treated as plaintext — even if it happens to look like base64.
+- Encrypted values are still distinguishable by the `$e$` prefix for human inspection.
+
 ### What SecureEnv Protects Against
 
 | Threat | Mitigated? | Details |
 |--------|------------|---------|
 | 🔍 Plaintext `.env` on disk | ✅ **Yes** | All values encrypted with AES-256-CBC |
-| 🧠 LLM reading file context | ✅ **Yes** | LLM sees only ciphertext; cannot decrypt |
+| 🧠 LLM reading file context | ✅ **Yes** | LLM sees only ciphertext; cannot decrypt without the password |
 | 💾 Cold boot / memory dump | ✅ **Partial** | Bytearray zeroing reduces exposure window significantly |
 | 🔁 Heap inspection after password use | ✅ **Strong** | Buffer overwritten and garbage collected |
 | 🕵️ Password string interning | ✅ **Mitigated** | Long passwords (>20 chars) avoid CPython's small-string cache |
 | 🔓 Brute force attacks | ✅ **Mitigated** | PBKDF2 with 100K iterations slows dictionary attacks |
+| ❌ False positive encryption detection | ✅ **Eliminated** | `$e$` prefix provides deterministic detection |
 
 ### Limitations
 
@@ -277,12 +278,13 @@ A comprehensive test suite is included:
 python test_sec_env.py
 ```
 
-### 14 Test Functions
+### 16 Test Functions
 
 | Test | Validates |
 |------|-----------|
 | `test_process_str_password` | Encryption with string password; preserves formatting |
 | `test_process_bytearray_password` | Encryption with bytearray password |
+| `test_process_long_alphanumeric` | Long alphanumeric values are correctly encrypted (no false positive) |
 | `test_load` | Load decrypts all values into os.environ |
 | `test_load_bytearray_password` | Load with bytearray; verifies password is wiped |
 | `test_restore` | Full cycle restore — encrypt then decrypt back to original plaintext |
@@ -292,9 +294,10 @@ python test_sec_env.py
 | `test_key` | Single-key access; custom env_path support |
 | `test_key_bytearray_password` | Key function wipes passed bytearray |
 | `test_error_handling` | FileNotFoundError and wrong password handling |
-| `test_round_trip` | Full cycle: process → load → key → unlocker |
+| `test_round_trip` | Full cycle: process → load → key → unlocker → restore |
 | `test_load_mixed_content` | Handles both encrypted and plaintext values |
-| `test_memory_wipe_detailed` | 5 sub-tests verifying all wipe behaviors |
+| `test_memory_wipe_detailed` | 6 sub-tests verifying all wipe behaviors |
+| `test_encrypted_prefix` | Validates `$e$` prefix correctly identifies encrypted values |
 
 ---
 
@@ -305,16 +308,16 @@ An encrypted `.env` file looks like:
 ```bash
 # This comment is preserved
 # Database configuration
-DATABASE_URL=U2FsdGVkX18+ABC123def456...
+DATABASE_URL=$e$U2FsdGVkX18+ABC123def456...
 
 # API Keys (encrypted)
-API_KEY=U2FsdGVkX18+GHI789jkl012...
+API_KEY=$e$U2FsdGVkX18+GHI789jkl012...
 
 # Plaintext value (non-sensitive)
 DEBUG=true
 ```
 
-- **Encrypted values** are base64-encoded blobs containing salt (16) + IV (16) + ciphertext
+- **Encrypted values** are prefixed with `$e$` followed by base64-encoded salt (16) + IV (16) + ciphertext
 - **Plaintext values** are passed through unchanged (e.g., `DEBUG=true`)
 - **Comments**, **blank lines**, and **key ordering** are all preserved
 - **Quoted values** are handled correctly (quotes are stripped before encryption)
@@ -327,10 +330,12 @@ DEBUG=true
 |---------|-----------------|-----------|
 | Secrets encrypted on disk | ❌ No | ✅ **Yes** |
 | AES-256-CBC encryption | ❌ No | ✅ **Yes** |
+| Deterministic encryption detection | ❌ N/A | ✅ **`$e$` prefix** |
 | Restore .env to plaintext | ❌ No | ✅ **Yes** |
 | Memory-safe password handling | ❌ N/A | ✅ **bytearray + zeroing** |
 | `load_dotenv()` compatibility | ✅ Yes | ✅ **`sec_env.load()`** |
 | Individual key decryption | ❌ No | ✅ **`unlock()` + `key()`** |
+| Long alphanumeric false positives | ❌ N/A | ✅ **None — deterministic prefix** |
 | Preserves comments/formatting | ✅ Yes | ✅ Yes |
 | Self-contained | ✅ Yes | ✅ Yes |
 | Password parameter order | N/A | `password` is first for `process()`, `load()`, and `restore()` |
@@ -341,8 +346,8 @@ DEBUG=true
 
 ```
 SecureEnv/
-├── sec_env.py          # Main module (self-contained)
-├── test_sec_env.py     # Comprehensive test suite
+├── sec_env.py          # Main module (self-contained, AES-256-CBC)
+├── test_sec_env.py     # Comprehensive test suite (16 tests)
 ├── sec_env_docs.md     # Detailed module documentation
 ├── README.md           # This file
 └── .gitignore
