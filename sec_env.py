@@ -216,7 +216,7 @@ def _load_env_file(env_path: str) -> dict:
 def process(
     password: Optional[Union[str, bytearray]] = None,
     env_path: Optional[str] = None,
-    in_place: bool = True
+    in_place: bool = False
 ) -> None:
     """
     Encrypt all plaintext values in a .env file, overwriting the file in-place.
